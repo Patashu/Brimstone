@@ -26,13 +26,16 @@ namespace Brimstone
 	}
 
 	public static class DebugLog {
+		private static object _lock = new object();
 		public static void WriteLine(string s, params object[] p) {
 #if DEBUG
-			System.Diagnostics.Debug.WriteLine(
-				string.Format("[{0}] Thread {1}: ",
-					DateTime.Now.ToString("HH:mm:ss.fff"),
-					System.Threading.Thread.CurrentThread.ManagedThreadId)
-				+ s, p);
+			lock (_lock)
+				using (var sr = new System.IO.StreamWriter("debug.txt", true))
+					sr.WriteLine(
+						string.Format("[{0}] Thread {1}: ",
+							DateTime.Now.ToString("HH:mm:ss.fff"),
+							System.Threading.Thread.CurrentThread.ManagedThreadId)
+						+ s, p);
 #endif
 		}
 	}

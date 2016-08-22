@@ -3,6 +3,20 @@ using System.Linq;
 
 namespace Brimstone
 {
+	public class FuzzyGameNodeComparer : IEqualityComparer<GameNode>
+	{
+		// Used when adding to and fetching from HashSet, and testing for equality
+		public bool Equals(GameNode x, GameNode y) {
+			if (Settings.UseGameHashForEquality)
+				return x.Game.Entities.FuzzyGameHash == y.Game.Entities.FuzzyGameHash;
+			return x.Game.PowerHistory.EquivalentTo(y.Game.PowerHistory);
+		}
+
+		public int GetHashCode(GameNode obj) {
+			return obj.Game.Entities.FuzzyGameHash;
+		}
+	}
+
 	public class GameNode
 	{
 		public Game Game { get; }

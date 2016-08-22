@@ -76,16 +76,19 @@ namespace Brimstone
 		}
 
 		public void Increment() {
-			Interlocked.Increment(ref _count);
+			//Interlocked.Increment(ref _count);
+			_count++;
 		}
 
 		public void Decrement() {
-			Interlocked.Decrement(ref _count);
+			//Interlocked.Decrement(ref _count);
+			_count--;
 		}
 
 		public long Count {
 			get {
-				return Interlocked.Read(ref _count);
+				//return Interlocked.Read(ref _count);
+				return _count;
 			}
 		}
 	}

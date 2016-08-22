@@ -78,14 +78,18 @@ namespace Test1
 			Console.WriteLine("{0} branches in {1}ms", tree.NodeCount, sw.ElapsedMilliseconds);
 			Console.WriteLine("{0} intermediate clones pruned ({1} unique branches kept)", tree.NodeCount - tree.LeafNodeCount, tree.LeafNodeCount);
 
-			var uniqueGames = tree.GetUniqueGames();
+			var uniqueGames = tree.GetUniqueGames().OrderBy(x => x.Key.Entities.FuzzyGameHash);
 			sw.Stop();
 
 			foreach (var kv in uniqueGames) {
 				Console.WriteLine(Math.Round(kv.Value * 100, 2) + "%: ");
 				Console.WriteLine("{0:s}", kv.Key);
+				foreach (var ph in kv.Key.PowerHistory.Skip(95))
+					Console.WriteLine(ph);
+				foreach (var aq in kv.Key.ActionQueue.History.Skip(99))
+					Console.WriteLine(aq);
 			}
-			Console.WriteLine("{0} unique games found in {1}ms", uniqueGames.Count, sw.ElapsedMilliseconds);
+			Console.WriteLine("{0} unique games found in {1}ms", uniqueGames.Count(), sw.ElapsedMilliseconds);
 		}
 	}
 }

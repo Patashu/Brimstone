@@ -1,4 +1,4 @@
-﻿//#define _TREE_DEBUG
+﻿#define _TREE_DEBUG
 
 using System;
 using System.Collections.Concurrent;
@@ -60,12 +60,14 @@ namespace Brimstone
 
 		public void Run(Action Action) {
 			RootNode.Game.ActionQueue.UserData = RootNode;
+			RootNode.Game.Entities.Changed = false;
 			Action();
 			searcher.PostProcess(this).Wait();
 		}
 
 		public async Task RunAsync(Action Action) {
 			RootNode.Game.ActionQueue.UserData = RootNode;
+			RootNode.Game.Entities.Changed = false;
 			await Task.Run(() => Action());
 			await searcher.PostProcess(this);
 		}
@@ -200,8 +202,6 @@ namespace Brimstone
 
 	public abstract class TreeActionWalker : ITreeActionWalker
 	{
-		public GameTree<GameNode> Tree { get; set; }
-
 		public abstract Dictionary<Game, double> GetUniqueGames();
 		public virtual void PostAction(ActionQueue q, GameTree<GameNode> tree, QueueActionEventArgs e) { }
 		public virtual Task PostProcess(GameTree<GameNode> tree) { return Task.FromResult(0); }
@@ -328,99 +328,214 @@ namespace Brimstone
 	public class BreadthFirstActionWalker : TreeActionWalker
 	{
 		// The maximum number of task threads to split the search queue up into
-		public int MaxDegreesOfParallelism { get; set; } = 5;
+		public int MaxDegreesOfParallelism { get; set; } = 7;
 
 		// The minimum number of game nodes that have to be in the queue in order to activate parallelization
 		// for a particular depth
 		public int MinNodesToParallelize { get; set; } = 100;
 
 		// All of the unique leaf node games found
-		private Dictionary<Game, ProbabilisticGameNode> uniqueGames = new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer());
+		private ConcurrentDictionary<Game, ProbabilisticGameNode> uniqueGames = new ConcurrentDictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer());
 
 		// The pruned search queue for the current search depth
-		private Dictionary<Game, ProbabilisticGameNode> searchQueue = new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer());
+		//private ConcurrentDictionary<Game, ProbabilisticGameNode> searchQueue = new ConcurrentDictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer());
+		// Makes a ConcurrentQueue with GetConsumingEnumerable and Take/TryTake
+		private BlockingCollection<ProbabilisticGameNode> searchQueue = new BlockingCollection<ProbabilisticGameNode>(new ConcurrentBag<ProbabilisticGameNode>());
+		private BlockingCollection<ProbabilisticGameNode> pruneQueue = new BlockingCollection<ProbabilisticGameNode>(new ConcurrentBag<ProbabilisticGameNode>());
+		private HashSet<int> visitedNodes = new HashSet<int>();
 
-		// Per-thread storage for partitioned search queue and unique games found
-		// (merged with the main lists after each depth is searched)
-		private ThreadLocal<Dictionary<Game, ProbabilisticGameNode>> tlsSearchQueue
-			= new ThreadLocal<Dictionary<Game, ProbabilisticGameNode>>(
-				() => new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer()), trackAllValues: true);
-		private ThreadLocal<Dictionary<Game, ProbabilisticGameNode>> tlsUniqueGames
-			= new ThreadLocal<Dictionary<Game, ProbabilisticGameNode>>(
-				() => new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer()), trackAllValues: true);
+		//private long NodesRemainingTotal;
 
 		// When an in-game action completes, check if the game state has changed
 		// Some actions (like selectors) won't cause the game state to change,
 		// so we continue running these until a game state change occurs
+
+		// PRODUCER
 		public override void PostAction(ActionQueue q, GameTree<GameNode> t, QueueActionEventArgs e) {
 			// This game will be on the same thread as the calling task in parallel mode if it hasn't been cloned
 			// If it has been cloned, it may be on a different thread
 			if (e.Game.Entities.Changed) {
+#if _TREE_DEBUG
+				var id = e.Game.GameId;
+				var hash = e.Game.Entities.FuzzyGameHash;
+				DebugLog.WriteLine("PostAction for {0}:{1:x8}", id, hash);
+				DebugLog.WriteLine("Game state CHANGED for {0}:{1:x8} after: {2}", id, hash, e);
+#endif
+				// The game state has changed so add it to the search queue
+				//bool added = true;
+				pruneQueue.Add(e.UserData as ProbabilisticGameNode);
+				/*
+				searchQueue.AddOrUpdate(e.Game, e.UserData as ProbabilisticGameNode,
+					(game, node) => {
+						node.Probability += ((ProbabilisticGameNode)e.UserData).Probability;
+#if _TREE_DEBUG
+						DebugLog.WriteLine("Pruned duplicate search node {0}:{1:x8}", id, hash);
+#endif
+						added = false;
+						return node;
+					});
+					*/
+				//if (added) {
+					//Interlocked.Increment(ref NodesRemainingTotal);
+#if _TREE_DEBUG
+					DebugLog.WriteLine("Queued new node {0}:{1:x8}", id, hash);
+#endif
+				//}
+				e.Cancel = true;
+			}
+#if _TREE_DEBUG
+			else {
+				var id = e.Game.GameId;
+				var hash = e.Game.Entities.FuzzyGameHash;
+				DebugLog.WriteLine("PostAction for {0}:{1:x8}", id, hash);
+				DebugLog.WriteLine("Game state unchanged for {0}:{1:x8} after: {2}", id, hash, e);
+			}
+#endif
+		}
+
+		private async Task consumer() {
+#if _TREE_DEBUG
+			DebugLog.WriteLine("Starting search queue consumer");
+#endif
+			//while (Interlocked.Read(ref NodesRemaining) > 0) {
+			// Blocks until an item becomes available
+			foreach (var node in searchQueue.GetConsumingEnumerable()) {
+#if _TREE_DEBUG
+				//DebugLog.WriteLine("Games in search queue: {0}", searchQueue.Count + 1);
+						//string.Concat(searchQueue.Select(x => string.Format(" {0}:{1:x8}", x.Game.GameId, x.Game.Entities.FuzzyGameHash))));
+#endif
+				// Sleep until something is queued
+
+				// Get whatever item
+				/*var game = searchQueue.First().Key;
+				ProbabilisticGameNode node;
+				searchQueue.TryRemove(game, out node);*/
+#if _TREE_DEBUG
+					var originalHash = node.Game.Entities.FuzzyGameHash;
+
+					DebugLog.WriteLine("Dequeuing node {0}:{1:x8} - NodesRemaining before dequeue = " + Interlocked.Read(ref NodesRemainingThisDepth), node.Game.GameId, originalHash);
+#endif
 				// If the action queue is empty, we have reached a leaf node game state
 				// so compare it for equality with other final game states
-				if (e.Game.ActionQueue.Queue.Count == 0) {
-					t.LeafNodeCount++;
+				if (node.Game.ActionQueue.Queue.Count == 0) {
+					_tree.LeafNodeCount++;
 					// This will cause the game to be discarded if its fuzzy hash matches any other final game state
-					if (!tlsUniqueGames.Value.ContainsKey(e.Game)) {
-						tlsUniqueGames.Value.Add(e.Game, e.UserData as ProbabilisticGameNode);
+					// TODO: Maybe we can defer the write?
 #if _TREE_DEBUG
-						DebugLog.WriteLine("UNIQUE GAME FOUND ({0})", uniqueGames.Count);
+						//bool isNew = true;
 #endif
-					}
-					else {
-						tlsUniqueGames.Value[e.Game].Probability += ((ProbabilisticGameNode)e.UserData).Probability;
-#if _TREE_DEBUG
-						DebugLog.WriteLine("DUPLICATE GAME FOUND");
-#endif
-					}
+					/*	uniqueGames.AddOrUpdate(node.Game, node,
+							(g, n) => {
+								n.Probability += node.Probability;
+	#if _TREE_DEBUG
+									DebugLog.WriteLine("DUPLICATE GAME FOUND");
+									isNew = false;
+	#endif
+									return n;
+							});
+	#if _TREE_DEBUG
+							if (isNew) {
+								DebugLog.WriteLine("UNIQUE GAME FOUND ({0})", uniqueGames.Count);
+							}
+	#endif
+					*/
+					var r = Interlocked.Decrement(ref NodesRemainingThisDepth);
+					//var o = Interlocked.Read(ref NodesRemainingTotal);
+					//if (o == 0)
+					//searchQueue.CompleteAdding();
+					//Console.WriteLine("NodesRemaining: {0} / Queue size: {1} / Unique Games: {2} / RemainingThisDepth: {3}", o, searchQueue.Count, uniqueGames.Count, r);
+					if (r == 0)
+						lock (_pruneLock) Monitor.Pulse(_pruneLock);
 				}
 				else {
-					// The game state has changed but there are more actions to do
-					// (which may or may not involve further cloning) so add it to the search queue
-#if _TREE_DEBUG
-					DebugLog.WriteLine("QUEUEING FOR NEXT SEARCH");
-#endif
-					if (!tlsSearchQueue.Value.ContainsKey(e.Game))
-						tlsSearchQueue.Value.Add(e.Game, e.UserData as ProbabilisticGameNode);
-					else
-						tlsSearchQueue.Value[e.Game].Probability += ((ProbabilisticGameNode)e.UserData).Probability;
+					await node.Game.ActionQueue.ProcessAllAsync(node);
+					var r = Interlocked.Decrement(ref NodesRemainingThisDepth);
+					//var o = Interlocked.Read(ref NodesRemainingTotal);
+					//if (o == 0)
+					//searchQueue.CompleteAdding();
+					//Console.WriteLine("NodesRemaining: {0} / Queue size: {1} / Unique Games: {2} / RemainingThisDepth: {3}", o, searchQueue.Count, uniqueGames.Count, r);
+					if (r == 0)
+						lock (_pruneLock) Monitor.Pulse(_pruneLock);
 				}
+
+				// This node has now been fully processed
+				//					Interlocked.Decrement(ref NodesRemaining);
 #if _TREE_DEBUG
-				DebugLog.WriteLine("");
+					DebugLog.WriteLine("Processed node {0}:{1:x8} - NodesRemaining after dequeue = " + Interlocked.Read(ref NodesRemainingThisDepth), node.Game.GameId, originalHash);
 #endif
-				e.Cancel = true;
 			}
 		}
 
 		// This is the entry point after the root node has been pushed into the queue
 		// and the first change to the game has occurred
+
+		private GameTree<GameNode> _tree;
+		private long NodesRemainingThisDepth = 0;
+		private object _pruneLock = new object();
+
+		private void prune() {
+			bool workRemaining;
+#if _TREE_DEBUG
+			int depth = 0;
+#endif
+			do {
+#if _TREE_DEBUG
+				DebugLog.WriteLine("DEPTH {0} - Starting new prune - checking {1} nodes", ++depth, pruneQueue.Count);
+				int unpruned = 0;
+#endif
+				workRemaining = false;
+				var localPruneQueue = pruneQueue.ToList();
+				pruneQueue = new BlockingCollection<ProbabilisticGameNode>(new ConcurrentBag<ProbabilisticGameNode>());
+				foreach (var node in localPruneQueue) {
+					if (!visitedNodes.Contains(node.Game.Entities.FuzzyGameHash)) {
+						Interlocked.Increment(ref NodesRemainingThisDepth);
+						visitedNodes.Add(node.Game.Entities.FuzzyGameHash);
+						searchQueue.Add(node);
+						workRemaining = true;
+#if _TREE_DEBUG
+						unpruned++;
+#endif
+					}
+					//var o = Interlocked.Decrement(ref NodesRemainingTotal);
+					//Console.WriteLine("NodesRemaining {0} - pruned node", o);
+				}
+#if _TREE_DEBUG
+				DebugLog.WriteLine("DEPTH {0} - Finished queuing up {1} unpruned nodes", depth, unpruned);
+#endif
+				if (workRemaining)
+					lock (_pruneLock) {
+						if (Interlocked.Read(ref NodesRemainingThisDepth) > 0)
+							Monitor.Wait(_pruneLock);
+					}
+				else
+					searchQueue.CompleteAdding();
+			} while (workRemaining);
+#if _TREE_DEBUG
+			DebugLog.WriteLine("Prune queue task exiting");
+#endif
+		}
+
 		public override async Task PostProcess(GameTree<GameNode> t) {
+			_tree = t;
+
+			var _pruneTask = Task.Run((Action)prune);
+
+			// Make a single consumer
+			var consumers = new List<Task>();
+			for (int i = 0; i < MaxDegreesOfParallelism; i++)
+				consumers.Add(Task.Run(consumer));
+
+			await _pruneTask;
+			await Task.WhenAll(consumers);
+			//Console.WriteLine(NodesRemainingTotal);
+			// TODO: Cancel prune task
+
+			/*
 			// Breadth-first processing loop
 			do {
-				// Merge the TLS lists into the main lists
-				foreach (var sq in tlsSearchQueue.Values) {
-					foreach (var qi in sq) {
-						if (!searchQueue.ContainsKey(qi.Key))
-							searchQueue.Add(qi.Key, qi.Value);
-						else
-							searchQueue[qi.Key].Probability += qi.Value.Probability;
-					}
-				}
-				foreach (var ug in tlsUniqueGames.Values) {
-					foreach (var qi in ug) {
-						if (!uniqueGames.ContainsKey(qi.Key))
-							uniqueGames.Add(qi.Key, qi.Value);
-						else
-							uniqueGames[qi.Key].Probability += qi.Value.Probability;
-					}
-				}
 #if _TREE_DEBUG
 				DebugLog.WriteLine("QUEUE SIZE: " + searchQueue.Count);
 #endif
-				// Wipe the TLS lists
-				tlsSearchQueue = new ThreadLocal<Dictionary<Game, ProbabilisticGameNode>>(() => new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer()), trackAllValues: true);
-				tlsUniqueGames = new ThreadLocal<Dictionary<Game, ProbabilisticGameNode>>(() => new Dictionary<Game, ProbabilisticGameNode>(new FuzzyGameComparer()), trackAllValues: true);
-
 				// Quit if we have processed all nodes and none of them have children (all leaf nodes)
 				if (searchQueue.Count == 0)
 					break;
@@ -474,6 +589,7 @@ namespace Brimstone
 #endif
 				}
 			} while (true);
+			*/
 		}
 
 		public override Dictionary<Game, double> GetUniqueGames() {

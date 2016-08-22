@@ -12,7 +12,7 @@ namespace Brimstone
 			var played = (Entity)Game.Action(this, Actions.Play(this));
 
 			// Spells go to the graveyard after they are played
-			((Player)played.Controller).Graveyard.MoveTo(played);
+			/* ((Player)played.Controller).Graveyard.MoveTo(played); */
 
 			return (IPlayable) played;
 		}
